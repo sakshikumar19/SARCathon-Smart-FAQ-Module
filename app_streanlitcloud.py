@@ -3,35 +3,36 @@ import numpy as np
 import faiss
 from sentence_transformers import SentenceTransformer
 import pickle
-from huggingface_hub import HuggingFaceHub
+from langchain.llms import HuggingFaceHub
 from langchain.prompts import PromptTemplate
+import os
+
+# Get the Hugging Face API token from the environment variable
+huggingface_api_token = os.getenv('HUGGINGFACE_API_TOKEN')
 
 # Load the FAISS index and documents
-index = faiss.read_index('/kaggle/working/faiss_index.index')
-with open('/kaggle/working/documents.pkl', 'rb') as f:
-    documents = pickle.load(f)
+@st.cache_resource
+def load_resources():
+    index = faiss.read_index('./faiss_index.index')
+    with open('./documents.pkl', 'rb') as f:
+        documents = pickle.load(f)
+    model = SentenceTransformer('all-MiniLM-L6-v2')
+    return index, documents, model
 
-# Initialize the SentenceTransformer model
-model = SentenceTransformer('all-MiniLM-L6-v2')
-
-# Get the Hugging Face API token from Streamlit secrets
-huggingface_api_token = st.secrets["huggingface"]["api_token"]
+index, documents, model = load_resources()
 
 # Initialize the HuggingFace LLM
 llm = HuggingFaceHub(
     repo_id="mistralai/Mistral-7B-Instruct-v0.3",
     model_kwargs={"temperature": 0.2, "max_new_tokens": 512, "return_full_text": False},
-    huggingfacehub_api_token=huggingface_api_token  # Use the token from Streamlit secrets
+    huggingfacehub_api_token=huggingface_api_token
 )
 
+# Define the prompt template
 prompt_template = PromptTemplate(
-    template="You are an AI assistant helping to answer user queries. Use the following context to provide an answer.\n\nContext:\n{context}\n\nQuery:\n{query}\nAnswer:",
+    template="You are an AI assistant helping to answer FAQs. Use the following context to provide an answer. If the user asks an irrelevant question or greets, display appropriate message.\n\nContext:\n{context}\n\nQuery:\n{query}\nAnswer:",
     input_variables=["context", "query"]
 )
-
-# Initialize session state
-if "messages" not in st.session_state:
-    st.session_state.messages = [{"role": "assistant", "content": "How may I help you?"}]
 
 # Function to get suggestions
 def get_suggestions(user_input, top_k=3):
@@ -57,33 +58,56 @@ def generate_answer_with_llm(query):
     response = llm(formatted_prompt)
     return response
 
+# Initialize session state
+if "messages" not in st.session_state:
+    st.session_state.messages = [
+        {"role": "assistant", "content": """Welcome to the FAQ Wizard! 😊
+Feel free to type your query below to receive some helpful question suggestions. You can click on any suggestion that catches your eye, or if you prefer, type your own question. Happy chatting!"""}
+    ]
+if "show_suggestions" not in st.session_state:
+    st.session_state.show_suggestions = False
+if "current_suggestions" not in st.session_state:
+    st.session_state.current_suggestions = []
+
+# Main chat area
+st.title("FAQ Wizard Chat")
+
 # Display chat messages
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
-        st.write(message["content"])
+        st.markdown(message["content"])
 
-# Input for user prompt
-user_input = st.text_input("Type your question:")
+# Chat input
+if prompt := st.chat_input("Type your question here"):
+    st.session_state.messages.append({"role": "user", "content": prompt})
+    with st.chat_message("user"):
+        st.markdown(prompt)
 
-# Display suggestions as the user types
-if user_input:
-    suggestions = get_suggestions(user_input)
-    if suggestions:
-        st.sidebar.subheader("Suggestions:")
-        for suggestion in suggestions:
-            st.sidebar.write(suggestion)
-
-# Generate response on Enter
-if st.button("Submit"):
-    if user_input:
-        st.session_state.messages.append({"role": "user", "content": user_input})
-        with st.chat_message("user"):
-            st.write(user_input)
-
-        # Generate response using the LLM
-        response = generate_answer_with_llm(user_input)
-
-        # Append assistant message
+    # Generate and display response
+    with st.chat_message("assistant"):
+        response = generate_answer_with_llm(prompt)
+        st.markdown(response)
         st.session_state.messages.append({"role": "assistant", "content": response})
-        with st.chat_message("assistant"):
-            st.write(response)
+    
+    # Generate new suggestions
+    st.session_state.current_suggestions = get_suggestions(prompt)
+    st.session_state.show_suggestions = True
+    st.rerun()
+
+# Sidebar for suggestions
+with st.sidebar:
+    st.header("Suggestions")
+    if st.session_state.show_suggestions and st.session_state.current_suggestions:
+        st.subheader("You might also want to ask:")
+        for suggestion in st.session_state.current_suggestions:
+            if st.button(suggestion, key=suggestion):
+                st.session_state.messages.append({"role": "user", "content": suggestion})
+                with st.chat_message("user"):
+                    st.markdown(suggestion)
+                with st.chat_message("assistant"):
+                    response = generate_answer_with_llm(suggestion)
+                    st.markdown(response)
+                    st.session_state.messages.append({"role": "assistant", "content": response})
+                # Generate new suggestions based on the selected suggestion
+                st.session_state.current_suggestions = get_suggestions(suggestion)
+                st.rerun()
